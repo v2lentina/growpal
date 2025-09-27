@@ -6,6 +6,7 @@ from ultralytics import YOLO
 import numpy as np
 from collections import Counter
 import os
+from vilib import Vilib
 
 def detect_purple_flowers(image):
     """
@@ -91,32 +92,73 @@ class WeedDetector:
             return False
     
     def init_camera(self, camera_index=0):
+        """Initialize PiCrawler camera using vilib"""
         try:
-            self.camera = cv2.VideoCapture(camera_index)
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            print("🔧 Starting vilib camera...")
             
-            #Test
-            ret, frame = self.camera.read()
-            if not ret:
-                raise Exception("Can't capture image from camera")
+            # Start vilib camera system
+            Vilib.camera_start(vflip=False, hflip=False)
+            time.sleep(1)  # Give camera time to initialize
+            
+            # Test capture
+            test_frame = Vilib.get_frame()
+            if test_frame is None:
+                raise Exception("Failed to capture test frame from vilib camera")
                 
-            print(f"Camera initialized (Index: {camera_index})")
+            print(f"✅ Vilib camera initialized successfully")
+            print(f"   Frame shape: {test_frame.shape}")
+            
+            # Store vilib as camera (we'll handle it differently in take_photo)
+            self.camera = "vilib_camera"  # Flag to indicate we're using vilib
             return True
+            
         except Exception as e:
-            print(f"Error while initializing camera: {e}")
-            return False
+            print(f"❌ Error initializing vilib camera: {e}")
+            print("   Falling back to OpenCV camera...")
+            
+            # Fallback to OpenCV camera
+            try:
+                self.camera = cv2.VideoCapture(camera_index)
+                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                
+                ret, frame = self.camera.read()
+                if not ret:
+                    raise Exception("Can't capture image from OpenCV camera")
+                    
+                print(f"✅ OpenCV camera initialized (Index: {camera_index})")
+                return True
+                
+            except Exception as e2:
+                print(f"❌ OpenCV camera also failed: {e2}")
+                return False
     
     def take_photo(self):
+        """Take photo using vilib or OpenCV camera"""
         if self.camera is None:
-            print("Camera not initialized!")
+            print("❌ Camera not initialized!")
             return None
-            
-        ret, frame = self.camera.read()
-        if ret:
-            return frame
-        else:
-            print("Error capturing image from camera")
+        
+        try:
+            if self.camera == "vilib_camera":
+                # Use vilib camera
+                frame = Vilib.get_frame()
+                if frame is not None:
+                    return frame
+                else:
+                    print("❌ Failed to get frame from vilib camera")
+                    return None
+            else:
+                # Use OpenCV camera
+                ret, frame = self.camera.read()
+                if ret:
+                    return frame
+                else:
+                    print("❌ Error capturing image from OpenCV camera")
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ Error in take_photo: {e}")
             return None
     
     def detect_objects_in_image(self, image):
@@ -281,11 +323,124 @@ class WeedDetector:
                 'details': result['details']
             }
     
-    def cleanup(self):
-        """Cleans up resources"""
-        if self.camera is not None:
-            self.camera.release()
-            print("Camera released")
+    def real_time_detection(self, display_video=True):
+        """
+        REAL-TIME continuous weed detection
+        Continuously captures from camera and analyzes frames
+        """
+        print("🔄 Starting REAL-TIME weed detection...")
+        print("Press 'q' to quit, 'SPACE' to save current frame")
+        
+        if self.camera is None:
+            print("❌ Camera not initialized!")
+            return
+            
+        if self.model is None:
+            print("❌ Model not loaded!")
+            return
+        
+        frame_count = 0
+        weed_detections = 0
+        
+        try:
+            while True:
+                # Capture frame using our take_photo method (works with both vilib and OpenCV)
+                frame = self.take_photo()
+                if frame is None:
+                    print("❌ Failed to capture frame")
+                    break
+                
+                frame_count += 1
+                
+                # Analyze every frame (or every N frames for performance)
+                if frame_count % 5 == 0:  # Analyze every 5th frame for speed
+                    detections = self.detect_objects_in_image(frame)
+                    weeds = [d for d in detections if d['class'] == 'weed']
+                    
+                    if len(weeds) > 0:
+                        weed_detections += 1
+                        print(f"🌱 Frame {frame_count}: {len(weeds)} weeds detected!")
+                        
+                        # Draw bounding boxes on frame
+                        if display_video:
+                            for weed in weeds:
+                                bbox = weed['bbox']
+                                x, y, w, h = bbox
+                                # Draw red rectangle around weed
+                                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                                # Add confidence text
+                                conf_text = f"WEED {weed['confidence']:.1%}"
+                                cv2.putText(frame, conf_text, (x, y-10), 
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                
+                # Display video feed with detections
+                if display_video:
+                    # Add info overlay
+                    info_text = f"Frame: {frame_count} | Weeds found: {weed_detections}"
+                    cv2.putText(frame, info_text, (10, 30), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    cv2.imshow('PiCrawler Real-Time Weed Detection', frame)
+                
+                # Handle keyboard input
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    print("👋 Stopping real-time detection...")
+                    break
+                elif key == ord(' '):  # Spacebar
+                    # Save current frame
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    filename = f"realtime_capture_{timestamp}.jpg"
+                    cv2.imwrite(filename, frame)
+                    print(f"📸 Saved frame: {filename}")
+                
+        except KeyboardInterrupt:
+            print("\n👋 Real-time detection stopped by user")
+        
+        finally:
+            if display_video:
+                cv2.destroyAllWindows()
+            print(f"📊 Session summary:")
+            print(f"   Total frames processed: {frame_count}")
+            print(f"   Frames with weeds: {weed_detections}")
+
+    def continuous_scan_mode(self):
+        """
+        Continuous scanning without video display (for headless operation)
+        Reports weed findings every few seconds
+        """
+        print("🔍 Starting CONTINUOUS SCAN mode...")
+        print("Press Ctrl+C to stop")
+        
+        scan_interval = 3  # seconds between scans
+        
+        try:
+            while True:
+                # Take photo and analyze
+                image = self.take_photo()
+                if image is not None:
+                    detections = self.detect_objects_in_image(image)
+                    weeds = [d for d in detections if d['class'] == 'weed']
+                    
+                    timestamp = time.strftime("%H:%M:%S")
+                    
+                    if len(weeds) > 0:
+                        print(f"🚨 [{timestamp}] WEEDS DETECTED!")
+                        for i, weed in enumerate(weeds, 1):
+                            pos = weed['center']
+                            conf = weed['confidence']
+                            print(f"   {i}. Position: ({pos[0]}, {pos[1]}) - {conf:.1%} confidence")
+                        
+                        # Here you would trigger robot action
+                        # self.trigger_robot_action(weeds[0]['center'])
+                        
+                    else:
+                        print(f"✅ [{timestamp}] Area clean")
+                
+                time.sleep(scan_interval)
+                
+        except KeyboardInterrupt:
+            print("\n👋 Continuous scanning stopped")
 
 # Test functions (without real camera)
 def test_with_image_file(image_path):
@@ -310,38 +465,91 @@ def test_with_image_file(image_path):
 
 # Main program
 if __name__ == "__main__":
+    import sys
+    
     print("🌱 PiCrawler Weed Detector started")
-
+    
+    # Check command line arguments
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].lower()
+        
+        if arg.endswith(('.jpg', '.jpeg', '.png')):
+            # FILE MODE: Analyze provided image file
+            print(f"📁 FILE MODE: Analyzing {sys.argv[1]}")
+            test_with_image_file(sys.argv[1])
+            exit(0)
+        elif arg == "realtime" or arg == "rt":
+            mode = "realtime"
+        elif arg == "continuous" or arg == "scan":
+            mode = "continuous"
+        else:
+            print("❌ Unknown argument. Use:")
+            print("   python3 vision.py                    # Interactive mode")
+            print("   python3 vision.py image.jpg          # Analyze image file")
+            print("   python3 vision.py realtime           # Real-time video")
+            print("   python3 vision.py continuous         # Continuous scanning")
+            exit(1)
+    else:
+        mode = "interactive"
+    
+    # Initialize detector
     detector = WeedDetector()
 
     # Load model
     if not detector.load_model():
-        print("Program terminated - Model could not be loaded")
+        print("❌ Program terminated - Model could not be loaded")
         exit(1)
 
-    # Initialize camera
+    # Initialize camera  
     if not detector.init_camera():
-        print("Program terminated - Camera could not be initialized")
+        print("❌ Program terminated - Camera could not be initialized")
         exit(1)
     
     try:
-        # Main loop (can be called later by PiCrawler)
-        print("\nReady for weed detection! Press Ctrl+C to exit")
-
-        while True:
-            input("Press Enter for weed scan...")
+        if mode == "realtime":
+            print("🎥 REAL-TIME MODE: Live video with weed detection")
+            detector.real_time_detection(display_video=True)
             
-            result = detector.scan_for_weeds()
-            print(f"\n📋 Result: {result}")
+        elif mode == "continuous":
+            print("🔄 CONTINUOUS MODE: Automatic scanning every few seconds")
+            detector.continuous_scan_mode()
+            
+        else:  # interactive mode
+            print("🔄 INTERACTIVE MODE: Press Enter for each scan")
+            while True:
+                input("Press Enter for weed scan...")
+                
+                result = detector.scan_for_weeds()
+                print(f"\n📋 Result: {result}")
 
-            if result['action'] == 'pull_weed':
-                print(f"ACTION: Robot should move to position {result['target_position']} and remove weed!")
-            elif result['action'] == 'continue':
-                print("All clean - Robot can continue moving")
+                if result['action'] == 'pull_weed':
+                    print(f"🎯 ACTION: Robot should move to position {result['target_position']} and remove weed!")
+                elif result['action'] == 'continue':
+                    print("✅ All clean - Robot can continue moving")
 
-            print("-" * 50)
+                print("-" * 50)
             
     except KeyboardInterrupt:
-        print("\nProgram terminated")
+        print("\n👋 Program terminated")
     finally:
         detector.cleanup()
+
+    def cleanup(self):
+        """Cleans up camera resources"""
+        if self.camera is not None:
+            if self.camera == "vilib_camera":
+                # Stop vilib camera
+                try:
+                    Vilib.camera_close()
+                    print("📷 Vilib camera closed")
+                except Exception as e:
+                    print(f"⚠️  Error closing vilib camera: {e}")
+            else:
+                # Release OpenCV camera
+                try:
+                    self.camera.release()
+                    print("📷 OpenCV camera released")
+                except Exception as e:
+                    print(f"⚠️  Error releasing OpenCV camera: {e}")
+            
+            self.camera = None
